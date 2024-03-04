@@ -1,0 +1,10 @@
+version : "3.0"
+services:
+  postgres:
+    image: postgres:latest
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: raja
+      POSTGRES_PASSWORD: hello
+      POSTGRES_DB: testdb
