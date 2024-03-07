@@ -9,3 +9,5 @@ edition = "2021"
 [dependencies]
 quote = "1.0.35"
 syn = "2.0.52"
+tokio = "1.36.0"
+tokio-postgres = "0.7.10"

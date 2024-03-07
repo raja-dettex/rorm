@@ -1,7 +1,11 @@
-use std::{collections::HashMap, fmt::format, hash::Hash, marker::PhantomData};
+use core::time;
+use std::{any::Any, collections::HashMap, fmt::format, hash::Hash, marker::PhantomData, sync::{mpsc::{channel, Receiver, Sender}, Arc, Mutex}, thread::{self, JoinHandle}};
 
-use orm_lib::{key_types, TableDeserialize, TableSerialize} ;
-use postgres::{Client, NoTls, Row};
+use orm_lib::serializer::util::{key_types, TableDeserialize, TableSerialize} ;
+use orm_lib::db_client::client::DbConn;
+use orm_lib::orm::orm::ORM;
+use tokio_postgres::{Client, NoTls, Row, connect};
+use std::thread::spawn;
 
 
 #[derive(Clone, Debug)]
@@ -19,7 +23,7 @@ impl TableSerialize for Person  {
     fn table_name() -> String { 
         "mouser".to_string()
     }
-    fn primary_key(&self) -> orm_lib::key_types {
+    fn primary_key(&self) -> key_types {
         key_types::U32(self.id as u32)
     }
 
@@ -64,172 +68,47 @@ impl TableDeserialize for Person {
 
 
 
-pub struct DbConn<T> { 
-    connection : Client,
-    marker: PhantomData<T>
-}
 
-impl<T : TableSerialize + TableDeserialize>  DbConn<T> { 
-    pub fn new(conn_str : &str) -> Result<DbConn<T>, String> 
-    where T: TableSerialize + TableDeserialize
-    {
-        let connection = Client::connect(conn_str, NoTls);
-        
-        match connection {
-            Ok(conn) => Ok(DbConn{connection : conn, marker: PhantomData}),
-            Err(err) => Err(err.to_string())
-        }
-    } 
-
-
-    pub fn migrate(&mut self) -> Result<u64, String> 
-    {
-        let fields = T::fields_names();
-        let types = T::field_types();
-        let mut stmt = String::new();
-        stmt.push_str(format!("CREATE TABLE {}(", T::table_name()).as_str());
-        for (i, value) in fields.iter().enumerate() { 
-            if i <  fields.len() - 1 { 
-                let str = format!("{} {}," , value, types.get(i).unwrap());    
-                stmt.push_str(str.as_str());
-            }
-            else { let str = format!("{} {}" , value, types.get(i).unwrap());
-                stmt.push_str(str.as_str());
-            }
-        }
-        stmt.push_str(");");
-        println!("stmt : {}" , stmt);
-        // let serialized = 
-        // let a = self.connection.execute(statement, &[])
-        //         .map_err(|err| err.to_string());
-        let res = self.connection.execute(&stmt, &[]).map_err(|err| err.to_string());
-        res
-    }
-
-    pub fn insert(&mut self, t : T) -> Result<u64, String>
-    {
-        let t_map = t.into_map();
-        let mut stmt = format!("INSERT INTO {} VALUES (", T::table_name());
-
-    let mut i = 0;
-    for (key, val) in t_map.clone() {
-        let formatted_value = match val {
-            key_types::U32(value) => value.to_string(),
-            key_types::String(value) => format!("'{}'", value),
-        };
-
-        stmt.push_str(&formatted_value);
-
-        if i < t_map.len() - 1 {
-            stmt.push_str(", ");
-        }
-
-        i += 1;
-    }
-
-    stmt.push_str(");");
-    println!("{}", stmt);
-
-        let res = self.connection.execute(&stmt, &[]).map_err(|err| err.to_string());
-        res
-    }
-
-    pub fn find_by_prim_key(&mut self, key_val: key_types)  -> Option<T>
-    { 
-        
-        let key = match key_val { 
-            key_types::U32(k) => k.to_string(),
-            key_types::String(str) => format!("'{}'", str)
-        };
-        let stmt = format!("SELECT * FROM {} WHERE {}={};", T::table_name(), T::prim_key_name(), key);
-        println!("{}", stmt);
-        let result = self.connection.query_one(&stmt, &[]).map_err(|err| err.to_string())
-            .unwrap();
-        let map = row_to_map(result);
-        let person = T::from_map(map);
-        person
-    }
-
-    pub fn find_all(&mut self) -> Vec<T>{
-        let query = format!("SELECT * FROM {};", T::table_name());
-        let result = self.connection.query(&query, &[])
-            .map_err(|err|err.to_string()).unwrap();
-        let mut items = Vec::new();
-        for row in result { 
-            let mut map = row_to_map(row);
-            let item = T::from_map(map).unwrap();
-            items.push(item);
-        }  
-        items
-    }
-
-    
-
-}
-
-fn row_to_map(row: Row) -> HashMap<String, key_types> {
-    let mut map = HashMap::new();
-
-    for column in row.columns() {
-        let column_name = column.name();
-        let column_value: key_types = match column.type_().name() {
-            
-            "int4" => key_types::U32(row.get::<_,i32>(column_name) as u32),
-            "text" => key_types::String(row.get::<_, String>(column_name)),
-            // Add more type mappings as needed based on your database schema
-            _ => unimplemented!("Unsupported column type"),
-        };
-
-        map.insert(column_name.to_string(), column_value);
-    }
-
-    map
-}
-
-
-pub struct ORM<T> { 
-    pub conn_pool : Vec<DbConn<T>>,
-    marker : PhantomData<T>
-}
-
-impl<T: TableSerialize + TableDeserialize>  ORM<T> {
-    pub fn new(conn_str : String) -> Self { 
-        let mut pool = Vec::new();
-        for i in 0..10 { 
-            let db_conn = DbConn::<T>::new(conn_str.as_str())
-            .map_err(|err| err).unwrap();
-            pool.push(db_conn);
-        }
-        ORM { conn_pool: pool, marker: PhantomData }
-        
-    }
-}
-
-
-fn main() {
+#[tokio::main]
+async fn main() {
     let person = Person { id : 2, name: "neha".to_string()};
     //println!("Hello, world!");
-    let fields = Person::fields_names();
-    let types = Person::field_types();
-    println!("{:#?} \n {:#?}", fields, types);
-    let person_map = person.into_map();
-    println!("{:#?}",person_map );
-    let retrieved = Person::from_map(person_map);
-    println!("{:#?}", retrieved.unwrap());
     let conn_str = "postgresql://raja:hello@localhost:5432/testdb";
-    let mut db_conn = DbConn::<Person>::new(conn_str).map_err(|err| err.to_string()).unwrap();
     //println!("{}", db_conn.connection);
     let stmt = "CREATE TABLE Person(id INT PRIMARY KEY, name VARCHAR(10));";
-    let res = db_conn.migrate().map_err(|err| err);
     
     // let result = db_conn.insert(person);
     // match result {
     //     Ok(val) => println!("{}", val),
     //     Err(err) => println!("{}", err)
     // }
-    let val = db_conn.find_by_prim_key(key_types::U32(1)).unwrap();
-    println!("value : {:#?}", val);
-    let all = db_conn.find_all();
+    // let val = db_conn.find_by_prim_key(key_types::U32(1)).unwrap();
+    // println!("value : {:#?}", val);
+    // let all = db_conn.find_all();
+    // println!("{:#?}", all);
+    
+    let mut orm = ORM::<Person>::new(conn_str.to_string()).await;
+    let all = orm.find_all().await;
+    let orm_arc = Arc::new(Mutex::new(orm));
+
+    let orm_arc_clone = Arc::clone(&orm_arc);
     println!("{:#?}", all);
-    let orm = ORM::<Person>::new(conn_str.to_string());
+    findAll_blocking(orm_arc).await;
+    findAll_non_blocking(orm_arc_clone).await;
+}
+
+async fn findAll_blocking(mut orm : Arc<Mutex<ORM<Person>>>) { 
+    
+    thread::sleep(time::Duration::from_secs(3));
+    let all = orm.lock().unwrap().find_all().await;
+    println!("first : {:#?}", all);
+}
+
+
+
+
+async fn findAll_non_blocking(mut orm : Arc<Mutex<ORM<Person>>>) { 
+    let all = orm.lock().unwrap().find_all().await;
+    //thread::sleep(time::Duration::from_secs(3));
+    println!("second : {:#?}", all);
 }
